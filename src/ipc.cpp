@@ -1,0 +1,308 @@
+#include "simstr.h"
+#include "ipc.h"
+#include "config.h"
+#include <fstream>
+#include <sstream>
+
+const std::string Ipc::IPC_ASCII        = "ipc ascii";
+const std::string Ipc::IPC_SUFFIX       = ".ipc";
+
+Ipc* Ipc::_self = NULL;
+display::State Ipc::_state;
+
+
+gboolean Ipc::is_ipc_filename(const std::string& fname)
+{
+    return fname.rfind(IPC_SUFFIX) == fname.length() - IPC_SUFFIX.length();
+}
+
+
+void Ipc::displayfunc()
+{
+    display::display(_state);
+}
+
+
+void Ipc::reshapefunc(int width, int height)
+{
+    display::reshape(_state, width, height);
+}
+
+
+void Ipc::mousefunc(int button, int state, int x, int y)
+{
+    display::mouse(_state, button, state, x, y);
+}
+
+
+void Ipc::keyboardfunc(unsigned char key, int x, int y)
+{
+#define endcase \
+    if (_state.draw_mode & display::POINTS)     list_points(_state, *_self); \
+    if (_state.draw_mode & display::LINES)      list_lines(_state, *_self); \
+    if (_state.draw_mode & display::TRIANGLES)  list_triangles(_state, *_self); \
+    glutPostRedisplay();break
+    int mod = glutGetModifiers();
+    std::string fname;
+    if (mod & GLUT_ACTIVE_ALT) {
+        switch (key) {
+           case 'S':
+                std::cout << "save ipc as(input file name): " << std::flush;
+                std::cin >> fname;
+                _self->write(fname);
+                std::cout << "done!" << std::endl;
+                break;
+        }
+    }
+    else {
+        display::keyboard(_state, key, x, y);
+    }
+#undef endcase
+}
+
+
+void Ipc::specialfunc(int key, int x, int y)
+{
+    display::special(_state, key, x, y);
+}
+
+
+void Ipc::motionfunc(int x, int y)
+{
+    display::motion(_state, x, y);
+}
+
+
+gdouble Ipc::side_interval() const
+{
+    gdouble side = 0.0;
+    if (_np.method == Ncparams::ISO_PLANAR) side = _np.ippside;
+    else if (_np.method == Ncparams::ISO_LAYER) side = _np.ilpside;
+    return side;
+}
+
+
+namespace
+{
+    void avertex_into_bbox(Vertex* v, GtsBBox* bbox)
+    {
+        v->enlarge_bbox(*bbox);
+    }
+}
+GtsBBox* Ipc::gen_bbox(GtsBBoxClass* bbclass) const
+{
+    GtsBBox* b = gts_bbox_new(bbclass, NULL, 0., 0., 0., 0., 0., 0.);
+    b->x1 = b->y1 = b->z1 = G_MAXDOUBLE;
+    b->x2 = b->y2 = b->z2 = -G_MAXDOUBLE;
+    foreach_vertex((GtsFunc) avertex_into_bbox, b);
+    return b;
+}
+
+
+void Ipc::foreach_vertex(GtsFunc f, gpointer data) const
+{
+    for (const_iterator iter = _ipc.begin(); iter != _ipc.end(); ++iter)
+    {
+        GSList* s = *iter;
+        while (s) {
+            f(GTS_POINT(GTS_SEGMENT(s->data)->v1), data);
+            f(GTS_POINT(GTS_SEGMENT(s->data)->v2), data);
+            s = s->next;
+        }
+    }
+}
+
+
+void Ipc::foreach_vertex(GtsFunc f, gpointer data)
+{
+    for (iterator iter = _ipc.begin(); iter != _ipc.end(); ++iter)
+    {
+        GSList* s = *iter;
+        while (s) {
+            f(GTS_POINT(GTS_SEGMENT(s->data)->v1), data);
+            f(GTS_POINT(GTS_SEGMENT(s->data)->v2), data);
+            s = s->next;
+        }
+    }
+}
+
+
+void Ipc::foreach_edge(GtsFunc f, gpointer data) const
+{
+    for (const_iterator iter = _ipc.begin(); iter != _ipc.end(); ++iter)
+    {
+        GSList* s = *iter;
+        while (s) {
+            f(GTS_SEGMENT(s->data), data);
+            s = s->next;
+        }
+    }
+}
+
+
+void Ipc::foreach_edge(GtsFunc f, gpointer data)
+{
+    for (iterator iter = _ipc.begin(); iter != _ipc.end(); ++iter)
+    {
+        GSList* s = *iter;
+        while (s) {
+            f(GTS_SEGMENT(s->data), data);
+            s = s->next;
+        }
+    }
+}
+
+
+void Ipc::read(const std::string& fname)
+{
+    g_return_if_fail(is_ipc_filename(fname));
+    std::ifstream fin(fname.c_str());
+    read(fin);
+    fin.close();
+}
+
+
+void Ipc::read(std::istream& is)
+{
+    destroy();
+
+    std::string line;
+    get_valid_line(is, line);
+    g_return_if_fail(line == IPC_ASCII);
+
+    std::stringstream ss;
+    guint size;
+
+    get_valid_line(is, line);
+    ss.clear();
+    ss.str(line);
+    ss >> size;
+
+    char c;
+    gdouble y, x1, z1, x2, z2;
+    for (guint i = 0; i != size; ++i) {
+        GSList* s = NULL;
+        get_valid_line(is, line);
+        g_return_if_fail(line[0] == '{');
+        ss.clear();
+        ss.str(line);
+        ss >> c >> y;
+
+        while (get_valid_line(is, line)) {
+            if (line[0] == '}') break;
+            ss.clear();
+            ss.str(line);
+            ss >> x1 >> z1 >> x2 >> z2;
+            Vertex* v1 = vertex_new(vertex_class(), x1, y, z1);
+            Vertex* v2 = vertex_new(vertex_class(), x2, y, z2);
+            Edge* edge = edge_new(edge_class(), v1, v2);
+            s = g_slist_prepend(s, edge);
+        }
+        s = g_slist_reverse(s);
+        _ipc.push_back(s);
+    }
+}
+
+
+void Ipc::write(const std::string& fname) const
+{
+    g_return_if_fail(is_ipc_filename(fname));
+    std::ofstream fout(fname.c_str());
+    write(fout);
+    fout.close();
+}
+
+
+void Ipc::write(std::ostream& out) const
+{
+    out << IPC_ASCII << "\n"
+        << RE_COMMENT << " iso planar path\n"
+        << RE_COMMENT << " generated by " << PACKAGE_STRING << "\n"
+        << RE_COMMENT << " developed by " << PACKAGE_BUGREPORT << "\n"
+        << _ipc.size() << "\n";
+
+    gdouble side = side_interval();
+    g_return_if_fail(side > 0.0);
+    const_iterator iter = _ipc.begin();
+    for (gdouble ypos = _np.ymin; ypos <= _np.ymax; ypos += side, ++iter)
+    {
+        g_return_if_fail(iter != _ipc.end());
+        GSList* i = (*iter);
+        out << "{ " << ypos << "\n";
+        while (i)
+        {
+            Edge* e = EDGE(i->data);
+            GtsPoint* p1 = GTS_POINT(e->v1()), *p2 = GTS_POINT(e->v2());
+            out << "  " << p1->x << " " << p1->z << "  ";
+            out << "  " << p2->x << " " << p2->z << "\n";
+            i = i->next;
+        }
+        out << "}\n";
+    }
+}
+
+
+void Ipc::make_curves(const Surface& s)
+{
+    gdouble side = side_interval();
+    g_return_if_fail(side > 0.0);
+    destroy();
+
+    gboolean free_leaves = TRUE;
+    GNode* t1 = s.gen_bbtree();
+    for (gdouble ypos = _np.ymin; ypos <= _np.ymax; ypos += side)
+    {
+        Surface planar(s.get_vclass(),
+                        s.get_eclass(),
+                        s.get_fclass());
+
+        planar.add_rectangle(
+                _np.xmin, ypos, _np.zmin,
+                _np.xmax, ypos, _np.zmin,
+                _np.xmax, ypos, _np.zmax,
+                _np.xmin, ypos, _np.zmax);
+        GNode* t2 = planar.gen_bbtree();
+
+        GSList* curve = s.gen_intersection(planar, t1, t2);
+        _ipc.push_back(curve);
+        gts_bb_tree_destroy(t2, free_leaves);
+    }
+
+    gts_bb_tree_destroy(t1, free_leaves);
+}
+
+
+void Ipc::show(GLenum mode)
+{
+    _self = this;
+    _state.draw_mode = mode;
+    display::show_init(*_self, _state);
+    if (_state.draw_mode & display::POINTS) list_points(_state, *_self);
+    if (_state.draw_mode & display::LINES)  list_lines(_state, *_self);
+    //list_axis(_state, 1.0, 1.0, 1.0);
+
+    glutDisplayFunc(displayfunc);
+    glutReshapeFunc(reshapefunc);
+    glutMouseFunc(mousefunc);
+    glutKeyboardFunc(keyboardfunc);
+    glutSpecialFunc(specialfunc);
+    glutMotionFunc(motionfunc);
+    //glutIdleFunc(idlefunc);
+    glutMainLoop();
+
+}
+
+
+void Ipc::destroy()
+{
+    for (iterator pi = _ipc.begin(); pi != _ipc.end(); ++pi) {
+        GSList* s = *pi;
+        while (s) {
+            gts_object_destroy(GTS_OBJECT(s->data));
+            s = s->next;
+        }
+        g_slist_free(*pi);
+    }
+    _ipc.clear();
+}
+
